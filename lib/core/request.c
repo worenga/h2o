@@ -692,12 +692,12 @@ h2o_iovec_t h2o_get_redirect_method(h2o_iovec_t method, int status)
     return method;
 }
 
-static void do_push_path(void *_req, const char *path, size_t path_len, int is_critical)
+static void do_push_path(void *_req, const char *path, size_t path_len, const char *authority, size_t authority_len, int is_critical)
 {
     h2o_req_t *req = _req;
-
+    
     if (req->conn->callbacks->push_path != NULL)
-        req->conn->callbacks->push_path(req, path, path_len, is_critical);
+        req->conn->callbacks->push_path(req, path, path_len, authority, authority_len, is_critical);
 }
 
 h2o_iovec_t h2o_push_path_in_link_header(h2o_req_t *req, const char *value, size_t value_len)

@@ -389,6 +389,11 @@ struct st_h2o_globalconf_t {
          * list of callbacks
          */
         h2o_protocol_callbacks_t callbacks;
+
+        unsigned custom_push_scheduler;
+        unsigned custom_push_streams;
+        unsigned custom_push_stream_offset;
+
     } http2;
 
     struct {
@@ -798,7 +803,7 @@ typedef struct st_h2o_conn_callbacks_t {
     /**
      * callback for server push (may be NULL)
      */
-    void (*push_path)(h2o_req_t *req, const char *abspath, size_t abspath_len, int is_critical);
+    void (*push_path)(h2o_req_t *req, const char *abspath, size_t abspath_len, const char *authority, size_t authority_len, int is_critical);
     /**
      * Return the underlying socket struct
      */
@@ -861,6 +866,11 @@ struct st_h2o_conn_t {
      * callbacks
      */
     const h2o_conn_callbacks_t *callbacks;
+
+    int push_streams_complete;
+    int last_finished_stream;
+    int html_finished;
+
 };
 
 /**
@@ -1252,7 +1262,7 @@ size_t h2o_stringify_proxy_header(h2o_conn_t *conn, char *buf);
 void h2o_extract_push_path_from_link_header(h2o_mem_pool_t *pool, const char *value, size_t value_len, h2o_iovec_t base_path,
                                             const h2o_url_scheme_t *input_scheme, h2o_iovec_t input_authority,
                                             const h2o_url_scheme_t *base_scheme, h2o_iovec_t *base_authority,
-                                            void (*cb)(void *ctx, const char *path, size_t path_len, int is_critical), void *cb_ctx,
+                                            void (*cb)(void *ctx, const char *path, size_t path_len, const char *authority, size_t authority_len, int is_critical), void *cb_ctx,
                                             h2o_iovec_t *filtered_value);
 /**
  * return a bitmap of compressible types, by parsing the `accept-encoding` header
@@ -2000,6 +2010,10 @@ inline h2o_conn_t *h2o_create_connection(size_t sz, h2o_context_t *ctx, h2o_host
     conn->id = __sync_add_and_fetch(&h2o_connection_id, 1);
 #endif
     conn->callbacks = callbacks;
+
+    conn->last_finished_stream = -1;
+    conn->push_streams_complete = 0;
+    conn->html_finished = 0;
 
     return conn;
 }

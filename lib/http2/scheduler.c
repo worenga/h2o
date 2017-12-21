@@ -21,6 +21,8 @@
  */
 #include "h2o.h"
 #include "h2o/http2_scheduler.h"
+#include "h2o/http2.h"
+#include "h2o/http2_internal.h"
 
 struct st_h2o_http2_scheduler_queue_t {
     uint64_t bits;
@@ -28,6 +30,25 @@ struct st_h2o_http2_scheduler_queue_t {
     h2o_linklist_t anchors[64];
     h2o_linklist_t anchor257;
 };
+
+static h2o_http2_scheduler_openref_t *get_openref_from_queue_node(h2o_http2_scheduler_queue_node_t *node)
+{
+        h2o_http2_scheduler_openref_t *ref = H2O_STRUCT_FROM_MEMBER(h2o_http2_scheduler_openref_t, _queue_node, node);
+        return ref;
+}
+
+
+static h2o_http2_stream_t *get_stream_from_ref(h2o_http2_scheduler_openref_t *ref)
+{
+    h2o_http2_stream_t *stream = H2O_STRUCT_FROM_MEMBER(h2o_http2_stream_t, _refs.scheduler, ref);
+    return stream;
+}
+
+static h2o_http2_stream_t *get_stream_from_queue_node(h2o_http2_scheduler_queue_node_t *ref)
+{
+    return get_stream_from_ref(get_openref_from_queue_node(ref));
+}
+
 
 static void queue_init(h2o_http2_scheduler_queue_t *queue)
 {
@@ -346,13 +367,140 @@ Redo:
     return bail_out;
 }
 
-int h2o_http2_scheduler_run(h2o_http2_scheduler_node_t *root, h2o_http2_scheduler_run_cb cb, void *cb_arg)
+static int proceed_custom_scheduler(h2o_http2_scheduler_node_t *root, h2o_http2_scheduler_node_t *node, h2o_http2_scheduler_run_cb cb, void *cb_arg)
 {
+Redo:
+    if (node->_queue == NULL)
+        return 0;
+
+    h2o_http2_scheduler_queue_node_t *drr_node = queue_pop(node->_queue);
+    if (drr_node == NULL)
+        return 0;
+
+    h2o_http2_scheduler_openref_t *ref = H2O_STRUCT_FROM_MEMBER(h2o_http2_scheduler_openref_t, _queue_node, drr_node);
+
+    h2o_http2_stream_t *stream = get_stream_from_ref(ref);
+    //printf("Custom Scheduler Popped: %d \n",stream->stream_id);
+    //printf("Custom Scheduler Last Finished: %d\n", stream->req.conn->last_finished_stream);
+
+
+    if (!ref->_self_is_active) {
+        /* run the children (manually-unrolled tail recursion) */
+        queue_set(node->_queue, &ref->_queue_node, ref->weight);
+        node = &ref->node;
+        /*if (h2o_http2_stream_is_push(stream->stream_id)) {
+            //Wait for pushed stream to become ready
+            return 1; //bail out!
+        }*/
+        
+        //Make sure we can run stream 1 (html), if not bail out.
+        if(stream->stream_id == 1)
+        {
+           return 1;
+        }
+        
+        goto Redo;
+    }
+
+    int has_custom_scheduler = stream->req.conn->ctx->globalconf->http2.custom_push_scheduler;
+    
+    if(has_custom_scheduler == 1)
+    {
+        int push_streams_complete = stream->req.conn->push_streams_complete;
+        int last_finished_stream = stream->req.conn->last_finished_stream;
+        int html_finished = stream->req.conn->html_finished;
+        
+        unsigned bytemark_to_send_compressed = stream->req.conn->ctx->globalconf->http2.custom_push_scheduler;
+        int push_streams_to_pass_through = stream->req.conn->ctx->globalconf->http2.custom_push_streams;
+
+        //For Push all:
+        //printf("complete, passthrough: %d %d \n",push_streams_complete, push_streams_to_pass_through);
+        
+        
+        //if(push_streams_complete < push_streams_to_pass_through && stream->stream_id > (push_streams_to_pass_through * 2))
+        //{
+        //    printf("reset1 %d\n", stream->stream_id);
+	    //    sleep(1);
+        //    queue_set(node->_queue, &ref->_queue_node, ref->weight);
+        //    node = root;
+        //    goto Redo;
+        //}
+        /*
+        else if(push_streams_complete == push_streams_to_pass_through && stream->stream_id != 1 && html_finished != 1)
+        {
+            printf("reset2 \n");
+            queue_set(node->_queue, &ref->_queue_node, ref->weight);
+            node = root;
+            goto Redo;
+        }*/
+
+        //If we have chosen stream 1 before
+        if(stream->stream_id == 1 && stream->data_send > bytemark_to_send_compressed && ref->_active_cnt > 1 && push_streams_complete < push_streams_to_pass_through)
+        {
+            queue_set(node->_queue, &ref->_queue_node, ref->weight);
+            node = &ref->node;
+            goto Redo;
+        }
+        if(stream->stream_id == 1 && stream->data_send >= bytemark_to_send_compressed && ref->_active_cnt == 1 && push_streams_complete < push_streams_to_pass_through)
+        {
+            queue_set(node->_queue, &ref->_queue_node, ref->weight);
+            node = &ref->node;
+            return 1;
+        }
+
+        if(push_streams_complete == push_streams_to_pass_through && last_finished_stream == 1)
+        {
+            //sleep(1);
+        }
+    }
+
+    //printf("Choosen : %d \n",stream->stream_id);
+
+    assert(ref->_active_cnt != 0);
+
+    /* call the callbacks */
+    int still_is_active, bail_out = cb(ref, &still_is_active, cb_arg);
+    if (still_is_active) {
+        queue_set(node->_queue, &ref->_queue_node, ref->weight);
+    } else {
+        ref->_self_is_active = 0;
+        if (--ref->_active_cnt != 0) {
+            queue_set(node->_queue, &ref->_queue_node, ref->weight);
+        } else if (ref->node._parent != NULL) {
+            decr_active_cnt(ref->node._parent);
+        }
+    }
+
+    return bail_out;
+}
+
+int h2o_http2_scheduler_run(void *connp, h2o_http2_scheduler_node_t *root, h2o_http2_scheduler_run_cb cb, void *cb_arg)
+{
+    h2o_http2_conn_t *conn = (h2o_http2_conn_t*) connp;
+    
+    unsigned has_custom_scheduler_attached = conn->super.ctx->globalconf->http2.custom_push_scheduler;
+    if(conn->super.ctx->globalconf->http2.custom_push_streams == 0)
+    {
+        has_custom_scheduler_attached = 0;
+    }
+    
+    //printf("Has Custom Scheduluer: %u\n", has_custom_scheduler_attached);
+
     if (root->_queue != NULL) {
         while (!queue_is_empty(root->_queue)) {
-            int bail_out = proceed(root, cb, cb_arg);
-            if (bail_out)
-                return bail_out;
+            if (has_custom_scheduler_attached == 0)
+            {
+                int bail_out = proceed(root, cb, cb_arg);
+                if (bail_out)
+                    return bail_out;
+            }
+            else
+            {
+                int bail_out = proceed_custom_scheduler(root, root, cb, cb_arg);
+                if (bail_out)
+                    return bail_out;
+            
+            }
         }
     }
     return 0;

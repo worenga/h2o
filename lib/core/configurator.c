@@ -30,6 +30,7 @@ struct st_core_config_vars_t {
     struct {
         unsigned reprioritize_blocking_assets : 1;
         unsigned push_preload : 1;
+
         h2o_casper_conf_t casper;
     } http2;
     struct {
@@ -85,6 +86,7 @@ static int on_core_exit(h2o_configurator_t *_self, h2o_configurator_context_t *c
         ctx->hostconf->http2.reprioritize_blocking_assets = self->vars->http2.reprioritize_blocking_assets;
         ctx->hostconf->http2.push_preload = self->vars->http2.push_preload;
         ctx->hostconf->http2.casper = self->vars->http2.casper;
+        
     } else if (ctx->pathconf != NULL) {
         /* exitting from path or extension-level configuration */
         ctx->pathconf->error_log.emit_request_errors = self->vars->error_log.emit_request_errors;
@@ -474,6 +476,27 @@ static int on_config_http2_reprioritize_blocking_assets(h2o_configurator_command
 
     return 0;
 }
+
+//CUSTOM SCHEDULER CONFIG START
+static int on_config_http2_custom_scheduler(h2o_configurator_command_t *cmd, h2o_configurator_context_t *ctx,
+                                                        yoml_t *node)
+{
+    return h2o_configurator_scanf(cmd, node, "%u", &ctx->globalconf->http2.custom_push_scheduler);
+}
+
+static int on_config_http2_custom_push_streams (h2o_configurator_command_t *cmd, h2o_configurator_context_t *ctx,
+                                                        yoml_t *node)
+{
+    return h2o_configurator_scanf(cmd, node, "%u", &ctx->globalconf->http2.custom_push_streams);
+}
+
+static int on_config_http2_custom_push_offset (h2o_configurator_command_t *cmd, h2o_configurator_context_t *ctx,
+                                                        yoml_t *node)
+{
+    return h2o_configurator_scanf(cmd, node, "%u", &ctx->globalconf->http2.custom_push_stream_offset);
+}
+//CUSTOM SCHEDULER CONFIG END
+
 
 static int on_config_http2_push_preload(h2o_configurator_command_t *cmd, h2o_configurator_context_t *ctx, yoml_t *node)
 {
@@ -886,6 +909,7 @@ void h2o_configurator__init_core(h2o_globalconf_t *conf)
         c->vars->http2.reprioritize_blocking_assets = 1; /* defaults to ON */
         c->vars->http2.push_preload = 1;                 /* defaults to ON */
         c->vars->error_log.emit_request_errors = 1;      /* defaults to ON */
+
         h2o_configurator_define_command(&c->super, "limit-request-body",
                                         H2O_CONFIGURATOR_FLAG_GLOBAL | H2O_CONFIGURATOR_FLAG_EXPECT_SCALAR,
                                         on_config_limit_request_body);
@@ -919,10 +943,26 @@ void h2o_configurator__init_core(h2o_globalconf_t *conf)
         h2o_configurator_define_command(&c->super, "http2-latency-optimization-max-cwnd",
                                         H2O_CONFIGURATOR_FLAG_GLOBAL | H2O_CONFIGURATOR_FLAG_EXPECT_SCALAR,
                                         on_config_http2_latency_optimization_max_cwnd);
+        
         h2o_configurator_define_command(&c->super, "http2-reprioritize-blocking-assets",
                                         H2O_CONFIGURATOR_FLAG_GLOBAL | H2O_CONFIGURATOR_FLAG_HOST |
                                             H2O_CONFIGURATOR_FLAG_EXPECT_SCALAR,
                                         on_config_http2_reprioritize_blocking_assets);
+        
+        h2o_configurator_define_command(&c->super, "http2-custom-push-scheduler",
+                                        H2O_CONFIGURATOR_FLAG_GLOBAL | H2O_CONFIGURATOR_FLAG_HOST |
+                                            H2O_CONFIGURATOR_FLAG_EXPECT_SCALAR,
+                                        on_config_http2_custom_scheduler);
+        h2o_configurator_define_command(&c->super, "http2-custom-push-number-streams",
+                                        H2O_CONFIGURATOR_FLAG_GLOBAL | H2O_CONFIGURATOR_FLAG_HOST |
+                                            H2O_CONFIGURATOR_FLAG_EXPECT_SCALAR,
+                                        on_config_http2_custom_push_streams);
+        h2o_configurator_define_command(&c->super, "http2-custom-push-index-offset",
+                                        H2O_CONFIGURATOR_FLAG_GLOBAL | H2O_CONFIGURATOR_FLAG_HOST |
+                                            H2O_CONFIGURATOR_FLAG_EXPECT_SCALAR,
+                                        on_config_http2_custom_push_offset);
+
+
         h2o_configurator_define_command(&c->super, "http2-push-preload",
                                         H2O_CONFIGURATOR_FLAG_GLOBAL | H2O_CONFIGURATOR_FLAG_HOST |
                                             H2O_CONFIGURATOR_FLAG_EXPECT_SCALAR,

@@ -505,10 +505,12 @@ static int fill_headers(h2o_req_t *req, struct phr_header *headers, size_t num_h
     for (i = 0; i != num_headers; ++i) {
         const h2o_token_t *token;
         h2o_strtolower((char *)headers[i].name, headers[i].name_len);
-        if ((token = h2o_lookup_token(headers[i].name, headers[i].name_len)) != NULL) {
-            if (token->proxy_should_drop_for_res) {
+        int is_push_hdr = strncmp((char *)headers[i].name,"x-extrapush",headers[i].name_len) == 0;
+
+        if ((token = h2o_lookup_token(headers[i].name, headers[i].name_len)) != NULL || is_push_hdr == 1) {
+            if (is_push_hdr == 0 && token->proxy_should_drop_for_res) {
                 /* skip */
-            } else if (token == H2O_TOKEN_CONTENT_LENGTH) {
+            } else if (is_push_hdr == 0 && token == H2O_TOKEN_CONTENT_LENGTH) {
                 if (req->res.content_length != SIZE_MAX) {
                     h2o_req_log_error(req, MODULE_NAME, "received multiple content-length headers from fcgi");
                     return -1;
@@ -526,10 +528,16 @@ static int fill_headers(h2o_req_t *req, struct phr_header *headers, size_t num_h
                 RFC suggests abs-path-style Location headers should trigger an internal redirection, but is that how the web servers
                 work?
                  */
+                if(is_push_hdr == 0)
+                {
                 h2o_add_header(&req->pool, &req->res.headers, token, NULL,
                                h2o_strdup(&req->pool, headers[i].value, headers[i].value_len).base, headers[i].value_len);
-                if (token == H2O_TOKEN_LINK)
+                }
+                else
+                {
+                    printf("PUSH SHIT!\n");
                     h2o_push_path_in_link_header(req, headers[i].value, headers[i].value_len);
+                }
             }
         } else if (h2o_memis(headers[i].name, headers[i].name_len, H2O_STRLIT("status"))) {
             h2o_iovec_t value = h2o_iovec_init(headers[i].value, headers[i].value_len);

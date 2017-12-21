@@ -144,6 +144,21 @@ static h2o_send_state_t send_data_pull(h2o_http2_conn_t *conn, h2o_http2_stream_
     cbuf.base = conn->_write.buf->bytes + conn->_write.buf->size + H2O_HTTP2_FRAME_HEADER_SIZE;
     cbuf.len = max_payload_size;
     send_state = h2o_pull(&stream->req, stream->_pull_cb, &cbuf);
+ 
+    //
+    if(send_state == H2O_SEND_STATE_FINAL){
+       conn->super.last_finished_stream= stream->stream_id;
+       if (h2o_http2_stream_is_push(stream->stream_id)) {
+        conn->super.push_streams_complete += 1;
+       }
+       if(stream->stream_id == 1)
+       {
+        conn->super.html_finished = 1;
+       }
+
+       printf("Committing Data Header Pull Stream %d (%.*s) Size: %d Final: %d\n",stream->stream_id,stream->req.path.len,stream->req.path.base,cbuf.len,send_state == H2O_SEND_STATE_FINAL);
+    }
+    //usleep(1000000);
     /* write the header */
     commit_data_header(conn, stream, &conn->_write.buf, cbuf.len, send_state);
 
@@ -159,6 +174,21 @@ static h2o_iovec_t *send_data_push(h2o_http2_conn_t *conn, h2o_http2_stream_t *s
 
     if ((max_payload_size = calc_max_payload_size(conn, stream)) == 0)
         goto Exit;
+
+    int has_custom_scheduler = stream->req.conn->ctx->globalconf->http2.custom_push_scheduler;
+        
+    if(has_custom_scheduler == 1)
+    {
+        int to_send_max = stream->req.conn->ctx->globalconf->http2.custom_push_stream_offset;
+
+        if(stream->stream_id == 1)
+        {
+            if(stream->data_send < to_send_max && stream->req.conn->last_finished_stream < 1)
+            {
+                max_payload_size = sz_min(max_payload_size, to_send_max);
+            }
+        }
+    }
 
     /* reserve buffer and point dst to the payload */
     dst.base =
@@ -195,6 +225,27 @@ static h2o_iovec_t *send_data_push(h2o_http2_conn_t *conn, h2o_http2_stream_t *s
         if (bufcnt != 0) {
             send_state = H2O_SEND_STATE_IN_PROGRESS;
         }
+        
+        int push_streams_to_pass_through = stream->req.conn->ctx->globalconf->http2.custom_push_streams;
+
+
+        if(send_state == H2O_SEND_STATE_FINAL)
+        {
+            conn->super.last_finished_stream = stream->stream_id;
+
+            if (h2o_http2_stream_is_push(stream->stream_id)) {
+                //printf("Sending Final Payload Stream: %d, %d / %d\n", stream->stream_id, payload_len, stream->data_send);
+                conn->super.push_streams_complete += 1;
+            }
+
+            if(stream->stream_id == 1)
+            {
+                conn->super.html_finished = 1;
+            }
+        }
+        //printf("Sending Payload Stream: %d, %d / %d\n", stream->stream_id, payload_len, stream->data_send);
+        stream->data_send += payload_len;
+        // usleep(1000000);
         commit_data_header(conn, stream, &conn->_write.buf, payload_len, send_state);
     }
 
@@ -214,8 +265,8 @@ static int send_headers(h2o_http2_conn_t *conn, h2o_http2_stream_t *stream)
 
     /* cancel push with an error response */
     if (h2o_http2_stream_is_push(stream->stream_id)) {
-        if (400 <= stream->req.res.status)
-            goto CancelPush;
+        //if (400 <= stream->req.res.status)
+        //    goto CancelPush;
         if (stream->cache_digests != NULL) {
             ssize_t etag_index = h2o_find_header(&stream->req.headers, H2O_TOKEN_ETAG, -1);
             if (etag_index != -1) {
@@ -326,7 +377,8 @@ void finalostream_start_pull(h2o_ostream_t *self, h2o_ostream_pull_cb cb)
     stream->_data.entries[0].base = "<pull interface>";
     stream->_data.entries[0].len = 1;
     stream->_data.size = 1;
-
+    
+    //printf("Register for Proceed Stream: %d (Pull Interface)!\n",stream->stream_id);
     h2o_http2_conn_register_for_proceed_callback(conn, stream);
 }
 
@@ -372,7 +424,8 @@ void finalostream_send(h2o_ostream_t *self, h2o_req_t *req, h2o_iovec_t *bufs, s
         memcpy(stream->_data.entries, bufs, sizeof(h2o_iovec_t) * bufcnt);
         stream->_data.size = bufcnt;
     }
-
+    
+    //printf("Register for Proceed Stream: %d (Push Interface)!\n",stream->stream_id);
     h2o_http2_conn_register_for_proceed_callback(conn, stream);
 }
 

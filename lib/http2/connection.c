@@ -63,7 +63,7 @@ static int close_connection(h2o_http2_conn_t *conn);
 static ssize_t expect_default(h2o_http2_conn_t *conn, const uint8_t *src, size_t len, const char **err_desc);
 static void do_emit_writereq(h2o_http2_conn_t *conn);
 static void on_read(h2o_socket_t *sock, const char *err);
-static void push_path(h2o_req_t *src_req, const char *abspath, size_t abspath_len, int is_critical);
+static void push_path(h2o_req_t *src_req, const char *abspath, size_t abspath_len,  const char *authority, size_t authority_len, int is_critical);
 static int foreach_request(h2o_context_t *ctx, int (*cb)(h2o_req_t *req, void *cbdata), void *cbdata);
 static void stream_send_error(h2o_http2_conn_t *conn, uint32_t stream_id, int errnum);
 
@@ -530,6 +530,7 @@ static void set_priority(h2o_http2_conn_t *conn, h2o_http2_stream_t *stream, con
                          int scheduler_is_open)
 {
     h2o_http2_scheduler_node_t *parent_sched;
+    const int INGORE_PRIO = 1;
 
     /* determine the parent */
     if (priority->dependency != 0) {
@@ -554,7 +555,10 @@ static void set_priority(h2o_http2_conn_t *conn, h2o_http2_stream_t *stream, con
     if (!scheduler_is_open) {
         h2o_http2_scheduler_open(&stream->_refs.scheduler, parent_sched, priority->weight, priority->exclusive);
     } else {
-        h2o_http2_scheduler_rebind(&stream->_refs.scheduler, parent_sched, priority->weight, priority->exclusive);
+        if(!INGORE_PRIO)
+        {
+            h2o_http2_scheduler_rebind(&stream->_refs.scheduler, parent_sched, priority->weight, priority->exclusive);
+        }
     }
 }
 
@@ -1154,7 +1158,7 @@ void do_emit_writereq(h2o_http2_conn_t *conn)
 
     /* push DATA frames */
     if (conn->state < H2O_HTTP2_CONN_STATE_IS_CLOSING && h2o_http2_conn_get_buffer_window(conn) > 0)
-        h2o_http2_scheduler_run(&conn->scheduler, emit_writereq_of_openref, conn);
+        h2o_http2_scheduler_run(conn, &conn->scheduler, emit_writereq_of_openref, conn);
 
     if (conn->_write.buf->size != 0) {
         /* write and wait for completion */
@@ -1335,45 +1339,89 @@ static h2o_http2_conn_t *create_conn(h2o_context_t *ctx, h2o_hostconf_t **hosts,
     return conn;
 }
 
-static int update_push_memo(h2o_http2_conn_t *conn, h2o_req_t *src_req, const char *abspath, size_t abspath_len)
+static int update_push_memo(
+    h2o_http2_conn_t *conn,
+    h2o_req_t *src_req,
+    const char *abspath,
+    size_t abspath_len,
+    const char *authority,
+    size_t authority_len
+)
 {
 
     if (conn->push_memo == NULL)
         conn->push_memo = h2o_cache_create(0, 1024, 1, NULL);
 
-    /* uses the hash as the key */
-    h2o_cache_hashcode_t url_hash = h2o_cache_calchash(src_req->input.scheme->name.base, src_req->input.scheme->name.len) ^
-                                    h2o_cache_calchash(src_req->input.authority.base, src_req->input.authority.len) ^
-                                    h2o_cache_calchash(abspath, abspath_len);
+    h2o_cache_hashcode_t url_hash;
+    if(authority == NULL){
+        url_hash= h2o_cache_calchash(src_req->input.scheme->name.base, src_req->input.scheme->name.len) ^
+        h2o_cache_calchash(src_req->input.authority.base, src_req->input.authority.len) ^
+        h2o_cache_calchash(abspath, abspath_len);
+    }
+    else{
+        url_hash= h2o_cache_calchash(src_req->input.scheme->name.base, src_req->input.scheme->name.len) ^
+        h2o_cache_calchash(authority, authority_len) ^
+        h2o_cache_calchash(abspath, abspath_len);
+
+    }
     return h2o_cache_set(conn->push_memo, 0, h2o_iovec_init(&url_hash, sizeof(url_hash)), url_hash, h2o_iovec_init(NULL, 0));
 }
 
-static void push_path(h2o_req_t *src_req, const char *abspath, size_t abspath_len, int is_critical)
+static void push_path(h2o_req_t *src_req, const char *abspath, size_t abspath_len, 
+const char *authority, size_t authority_len,
+int is_critical)
 {
     h2o_http2_conn_t *conn = (void *)src_req->conn;
     h2o_http2_stream_t *src_stream = H2O_STRUCT_FROM_MEMBER(h2o_http2_stream_t, req, src_req);
 
     /* RFC 7540 8.2.1: PUSH_PROMISE frames can be sent by the server in response to any client-initiated stream */
     if (h2o_http2_stream_is_push(src_stream->stream_id))
+    {
+        printf("Dropping Push stream: %s %s, Reason 1 \n",authority,abspath);
         return;
+    }
+        
 
     if (!src_stream->req.hostconf->http2.push_preload || !conn->peer_settings.enable_push ||
         conn->num_streams.push.open >= conn->peer_settings.max_concurrent_streams)
+            {
+        printf("Dropping Push stream: %s %s, Reason 2 \n",authority,abspath);
         return;
+    }
 
     if (conn->push_stream_ids.max_open >= 0x7ffffff0)
+         {
+        printf("Dropping Push stream: %s %s, Reason 3 \n",authority,abspath);
         return;
+    }
     if (!(h2o_linklist_is_empty(&conn->_pending_reqs) && can_run_requests(conn)))
+            {
+        printf("Dropping Push stream: %s %s, Reason 4 \n",authority,abspath);
         return;
+    }
 
     if (h2o_find_header(&src_stream->req.headers, H2O_TOKEN_X_FORWARDED_FOR, -1) != -1)
+            {
+        printf("Dropping Push stream: %s %s, Reason 5 \n",authority,abspath);
         return;
+    }
 
     if (src_stream->cache_digests != NULL) {
-        h2o_iovec_t url = h2o_concat(&src_stream->req.pool, src_stream->req.input.scheme->name, h2o_iovec_init(H2O_STRLIT("://")),
+        h2o_iovec_t url;
+        
+        if( authority == NULL )
+        {
+            url = h2o_concat(&src_stream->req.pool, src_stream->req.input.scheme->name, h2o_iovec_init(H2O_STRLIT("://")),
                                      src_stream->req.input.authority, h2o_iovec_init(abspath, abspath_len));
+        }else{
+            url = h2o_concat(&src_stream->req.pool, src_stream->req.input.scheme->name, h2o_iovec_init(H2O_STRLIT("://")),
+                                     h2o_iovec_init(authority,authority_len), h2o_iovec_init(abspath, abspath_len));
+        }
         if (h2o_cache_digests_lookup_by_url(src_stream->cache_digests, url.base, url.len) == H2O_CACHE_DIGESTS_STATE_FRESH)
-            return;
+                   {
+        printf("Cache Digest: %s %s \n",authority,abspath);
+        return;
+    }
     }
 
     /* delayed initialization of casper (cookie-based), that MAY be used together to cache-digests */
@@ -1392,13 +1440,18 @@ static void push_path(h2o_req_t *src_req, const char *abspath, size_t abspath_le
     }
 
     /* update the push memo, and if it already pushed on the same connection, return */
-    if (update_push_memo(conn, &src_stream->req, abspath, abspath_len))
+    if (update_push_memo(conn, &src_stream->req, abspath, abspath_len, authority, authority_len))
+    {
+        printf("Push Memo: %s %s \n",authority,abspath);
         return;
+    }
+        
 
     /* open the stream */
     h2o_http2_stream_t *stream = h2o_http2_stream_open(conn, conn->push_stream_ids.max_open + 2, NULL, &h2o_http2_default_priority);
     stream->received_priority.dependency = src_stream->stream_id;
     stream->push.parent_stream_id = src_stream->stream_id;
+    
     if (is_critical) {
         h2o_http2_scheduler_open(&stream->_refs.scheduler, &conn->scheduler, 257, 0);
     } else {
@@ -1409,8 +1462,16 @@ static void push_path(h2o_req_t *src_req, const char *abspath, size_t abspath_le
     /* setup request */
     stream->req.input.method = (h2o_iovec_t){H2O_STRLIT("GET")};
     stream->req.input.scheme = src_stream->req.input.scheme;
-    stream->req.input.authority =
-        h2o_strdup(&stream->req.pool, src_stream->req.input.authority.base, src_stream->req.input.authority.len);
+
+    if(authority == NULL)
+    {
+        stream->req.input.authority =
+            h2o_strdup(&stream->req.pool, src_stream->req.input.authority.base, src_stream->req.input.authority.len);
+    }
+    else{
+        stream->req.input.authority =
+            h2o_strdup(&stream->req.pool, authority, authority_len);
+    }
     stream->req.input.path = h2o_strdup(&stream->req.pool, abspath, abspath_len);
     stream->req.version = 0x200;
 
@@ -1428,6 +1489,8 @@ static void push_path(h2o_req_t *src_req, const char *abspath, size_t abspath_le
             }
         }
     }
+
+    //printf("Push: %s %s \n",authority,abspath);
 
     execute_or_enqueue_request(conn, stream);
 

@@ -580,9 +580,9 @@ Unknown:
 }
 
 static h2o_iovec_t to_push_path(h2o_mem_pool_t *pool, h2o_iovec_t url, h2o_iovec_t base_path, const h2o_url_scheme_t *input_scheme,
-                                h2o_iovec_t input_authority, const h2o_url_scheme_t *base_scheme, h2o_iovec_t *base_authority)
+                                h2o_iovec_t input_authority, const h2o_url_scheme_t *base_scheme, h2o_iovec_t *base_authority, h2o_url_t *resolved)
 {
-    h2o_url_t parsed, resolved;
+    h2o_url_t parsed;
 
     /* check the authority, and extract absolute path */
     if (h2o_url_parse_relative(url.base, url.len, &parsed) != 0)
@@ -599,13 +599,13 @@ static h2o_iovec_t to_push_path(h2o_mem_pool_t *pool, h2o_iovec_t url, h2o_iovec
         base.scheme = base_scheme;
         base.authority = *base_authority;
     }
-    h2o_url_resolve(pool, &base, &parsed, &resolved);
-    if (input_scheme != resolved.scheme)
+    h2o_url_resolve(pool, &base, &parsed, resolved);
+    if (input_scheme != resolved->scheme)
         goto Invalid;
-    if (!h2o_lcstris(input_authority.base, input_authority.len, resolved.authority.base, resolved.authority.len))
-        goto Invalid;
+    //if (!h2o_lcstris(input_authority.base, input_authority.len, resolved.authority.base, resolved.authority.len))
+    //    goto Invalid;
 
-    return resolved.path;
+    return resolved->path;
 
 Invalid:
     return h2o_iovec_init(NULL, 0);
@@ -614,7 +614,7 @@ Invalid:
 void h2o_extract_push_path_from_link_header(h2o_mem_pool_t *pool, const char *value, size_t value_len, h2o_iovec_t base_path,
                                             const h2o_url_scheme_t *input_scheme, h2o_iovec_t input_authority,
                                             const h2o_url_scheme_t *base_scheme, h2o_iovec_t *base_authority,
-                                            void (*cb)(void *ctx, const char *path, size_t path_len, int is_critical), void *cb_ctx,
+                                            void (*cb)(void *ctx, const char *path, size_t path_len, const char *authority, size_t authority_len, int is_critical), void *cb_ctx,
                                             h2o_iovec_t *filtered_value)
 {
     h2o_iovec_t iter = h2o_iovec_init(value, value_len), token_value;
@@ -636,9 +636,24 @@ void h2o_extract_push_path_from_link_header(h2o_mem_pool_t *pool, const char *va
     do {
         if ((token = h2o_next_token(&iter, ';', &token_len, NULL)) == NULL)
             break;
+        
         /* first element should be <URL> */
-        if (!(token_len >= 2 && token[0] == '<' && token[token_len - 1] == '>'))
+        if (!(token_len >= 2 && token[0] == '<'))
             break;
+
+        while(token[token_len - 1] != '>' && iter.len > 0)
+        {
+            token_len++;
+            iter.base++;
+            iter.len-=1;
+        }
+
+        if (token[token_len - 1] != '>')
+        {
+            break;
+        }
+
+
         h2o_iovec_t url_with_brackets = h2o_iovec_init(token, token_len);
         /* find rel=preload */
         int preload = 0, nopush = 0, push_only = 0, critical = 0;
@@ -655,12 +670,17 @@ void h2o_extract_push_path_from_link_header(h2o_mem_pool_t *pool, const char *va
                 critical = 1;
             }
         }
+        
+        
+
         /* push the path */
         if (!nopush && preload) {
+            h2o_url_t url;
             h2o_iovec_t path = to_push_path(pool, h2o_iovec_init(url_with_brackets.base + 1, url_with_brackets.len - 2), base_path,
-                                            input_scheme, input_authority, base_scheme, base_authority);
+                                            input_scheme, input_authority, base_scheme, base_authority, &url);
+            
             if (path.len != 0)
-                (*cb)(cb_ctx, path.base, path.len, critical);
+                (*cb)(cb_ctx, path.base, path.len, url.authority.base, url.authority.len, critical);
         }
         /* store the elements that needs to be preserved to filtered_value */
         if (push_only) {

@@ -28,10 +28,11 @@
 #include "h2o/cache.h"
 #include "h2o/http2_casper.h"
 #include "h2o/cache_digests.h"
-#include "h2o/http2_scheduler.h"
 
 typedef struct st_h2o_http2_conn_t h2o_http2_conn_t;
 typedef struct st_h2o_http2_stream_t h2o_http2_stream_t;
+
+#include "h2o/http2_scheduler.h"
 
 /* connection flow control window + alpha */
 #define H2O_HTTP2_DEFAULT_OUTBUF_SIZE 81920
@@ -199,6 +200,7 @@ struct st_h2o_http2_stream_t {
     unsigned blocked_by_server : 1;
     unsigned _conn_stream_in_progress : 1; /* true if the body is streaming */
 
+    size_t data_send;
     /* references governed by connection.c for handling various things */
     struct {
         h2o_linklist_t link;
@@ -265,6 +267,7 @@ struct st_h2o_http2_conn_t {
     } _write;
     h2o_cache_t *push_memo;
     h2o_http2_casper_t *casper;
+
 };
 
 int h2o_http2_update_peer_settings(h2o_http2_settings_t *settings, const uint8_t *src, size_t len, const char **err_desc);
